@@ -1651,14 +1651,51 @@ async function tkExport() {
 }
 
 // ------------------------------------------------------------ 术语统一替换
+//
+// 版本一致性：tmVersion 为输入版本号，编辑任一输入、选择文件或重新预览都会
+// 使其 +1，旧预览立即失效（清空结果并禁用下载）；tmPreviewSeq 为预览请求
+// 序号，仅「发起时版本仍当前且序号最新」的响应可更新结果、错误与按钮，
+// 过期的成功或失败一律忽略。tmSnapshot 只保存最近一次有效成功预览实际发送
+// 的 SRT 与术语快照，下载原样发送该快照，不再读取当前输入。
 
-bindTrackFile("tmFile", "tmSrt");
+let tmVersion = 0;         // 输入版本号：任何输入变化都会 +1
+let tmPreviewSeq = 0;      // 预览请求序号：仅最新请求可更新界面
+let tmSnapshot = null;     // 最近一次有效成功预览发送的请求体（JSON 字符串）
+let tmDownloading = false; // 下载进行中：禁止重复提交
+
+function tmInvalidate() {
+  tmVersion += 1;
+  tmSnapshot = null;
+  $("tmMessage").innerHTML = "";
+  $("tmResult").innerHTML = "";
+  $("tmExportBtn").disabled = true;
+}
+
+$("tmSrt").addEventListener("input", tmInvalidate);
+$("tmTerms").addEventListener("input", tmInvalidate);
+
+// 选择文件立即使旧预览失效；读取完成时若版本已变（期间又编辑了输入或另选
+// 了文件），旧文件回调直接丢弃，不覆盖更新后的输入。
+$("tmFile").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  tmInvalidate();
+  const ver = tmVersion;
+  const r = new FileReader();
+  r.onload = () => {
+    if (ver !== tmVersion) return;
+    $("tmSrt").value = r.result;
+    tmInvalidate();  // 文件内容写入后输入已变，同步失效并禁用下载
+  };
+  r.readAsText(f);
+});
 
 function tmPayload() {
   return JSON.stringify({ srt: $("tmSrt").value, terms: $("tmTerms").value });
 }
 
 function showTmError(msg) {
+  tmSnapshot = null;
   $("tmMessage").innerHTML = `<div class="error">⚠ ${escapeHtml(msg)}</div>`;
   $("tmResult").innerHTML = "";
   $("tmExportBtn").disabled = true;
@@ -1712,35 +1749,60 @@ function renderTmPreview(pv) {
 }
 
 async function tmPreview() {
-  $("tmMessage").innerHTML = "";
-  let res;
+  tmInvalidate();  // 重新预览：旧预览立即失效，清空结果并禁用下载
+  const ver = tmVersion;
+  const seq = ++tmPreviewSeq;
+  const body = tmPayload();  // 本次请求固定的输入快照
+  const stale = () => seq !== tmPreviewSeq || ver !== tmVersion;
+  let res, data;
   try {
     res = await fetch("/api/terms/preview", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: tmPayload(),
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
     });
-  } catch (e) { return showTmError("网络错误：" + e); }
-  const data = await res.json();
-  if (res.ok) return renderTmPreview(data);
-  return showTmError(tmErrDetail(data));
+    data = await res.json();
+  } catch (e) {
+    if (!stale()) showTmError("网络错误：" + e);
+    return;
+  }
+  if (stale()) return;  // 过期的成功或失败均忽略，不更新结果、错误与按钮
+  if (!res.ok) return showTmError(tmErrDetail(data));
+  tmSnapshot = body;  // 仅有效成功预览保存快照，下载时原样发送
+  renderTmPreview(data);
 }
 
 async function tmExport() {
-  let res;
+  if (tmDownloading || !tmSnapshot) return;  // 下载期间禁止重复提交；无有效预览快照不发送
+  const ver = tmVersion;
+  tmDownloading = true;
+  $("tmExportBtn").disabled = true;
   try {
-    res = await fetch("/api/terms/export", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: tmPayload(),
-    });
-  } catch (e) { return showTmError("网络错误：" + e); }
-  if (!res.ok) {
-    const data = await res.json();
-    return showTmError(tmErrDetail(data) || "下载被拒绝");
+    let res;
+    try {
+      res = await fetch("/api/terms/export", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: tmSnapshot,
+      });
+    } catch (e) {
+      if (ver === tmVersion) showTmError("网络错误：" + e);
+      return;
+    }
+    if (!res.ok) {
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* 非 JSON 错误体按通用提示处理 */ }
+      if (ver === tmVersion) showTmError(tmErrDetail(data) || "下载被拒绝");
+      return;
+    }
+    if (ver !== tmVersion) return;  // 返回时版本已变：丢弃文件，不触发保存
+    const blob = await res.blob();
+    if (ver !== tmVersion) return;  // 读取响应期间版本又变：同样丢弃
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "terms_replaced.srt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } finally {
+    tmDownloading = false;
+    $("tmExportBtn").disabled = !tmSnapshot;  // 快照仍有效才恢复可下载状态
   }
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "terms_replaced.srt";
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 </script>
 </body>
