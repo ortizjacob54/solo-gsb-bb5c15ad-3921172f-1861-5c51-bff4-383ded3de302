@@ -20,24 +20,28 @@
 
 ## 启动
 
-只需一条命令（依赖随容器自动安装）：
+只需一条命令：Docker 镜像构建时会依据 `requirements.txt` **自动安装全部依赖**（FastAPI / Uvicorn），容器启动即完成初始化并运行服务，无需手动安装或迁移。
 
 ```bash
 docker compose up --build
 ```
 
-然后在浏览器打开：
+启动后地址（容器内监听 `0.0.0.0:8000`）：
 
-**http://localhost:8000** （端口 `8000`）
+- **网页界面（单页，含全部十一个功能）**：http://localhost:8000
+- **HTTP API 根地址**：http://localhost:8000/api/… （例如 `POST http://localhost:8000/api/terms/preview`，完整接口清单见文末「API」一节）
+- 端口：宿主机与容器均为 **`8000`**；如需更改宿主机端口，编辑 `docker-compose.yml` 的 `"8000:8000"` 左侧端口（如 `"9000:8000"`）即可，API 与网页随该端口一同访问。
+- 必要配置：无数据库、无环境变量、无额外密钥；仅需 Docker 可用且该端口未被占用。
 
 停止：`Ctrl+C` 或 `docker compose down`。
 
-> 不使用 Docker 时（需 Python 3.10+，`pip install -r requirements.txt`），
-> 也可一条命令在本地启动，同样监听 **8000** 端口：
+> 不使用 Docker 时（需 Python 3.10+），依赖安装与服务启动同样可合并为一条命令，同样监听 **8000** 端口：
 >
 > ```bash
-> uvicorn app.main:app --host 0.0.0.0 --port 8000
+> pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000
 > ```
+>
+> 网页：http://localhost:8000 ；API：http://localhost:8000/api/… 。
 
 ## 使用方法
 

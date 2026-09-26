@@ -1652,7 +1652,50 @@ async function tkExport() {
 
 // ------------------------------------------------------------ 术语统一替换
 
-bindTrackFile("tmFile", "tmSrt");
+// 版本一致性：任一输入变化（编辑文本 / 选择文件 / 重新预览）都令 tmVersion +1。
+// 旧版本在途的文件读取、预览请求（无论成功或失败）与下载返回一律丢弃，
+// 只有「当前输入版本 + 最新预览请求」的成功响应才能更新结果与下载按钮。
+let tmVersion = 0;        // 当前输入版本
+let tmRequestSeq = 0;     // 已发起的预览请求序号（仅最新一请求可落盘结果）
+let tmSaved = null;       // 最近一次有效成功预览保存的快照 { body, preview }
+let tmExporting = false;  // 下载进行中标志（禁止重复提交）
+
+// 编辑任一输入：旧预览立即失效，清空结果并禁用下载。
+$("tmSrt").addEventListener("input", tmInvalidate);
+$("tmTerms").addEventListener("input", tmInvalidate);
+
+function tmInvalidate() {
+  tmVersion += 1;
+  tmSaved = null;
+  $("tmResult").innerHTML = "";
+  $("tmExportBtn").disabled = true;
+  $("tmMessage").innerHTML =
+    '<div class="hint">输入已变更，旧预览已失效，请重新预览后再下载。</div>';
+}
+
+// 选择文件即作废旧预览；FileReader 回调返回时若版本又已变化（读取期间继续
+// 编辑或另选文件），不得用旧文件内容覆盖更新后的输入。
+$("tmFile").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const v = ++tmVersion;
+  tmSaved = null;
+  $("tmResult").innerHTML = "";
+  $("tmExportBtn").disabled = true;
+  $("tmMessage").innerHTML = '<div class="hint">正在读取文件…</div>';
+  const r = new FileReader();
+  r.onload = () => {
+    if (v !== tmVersion) return;  // 过期读取回调：丢弃，不覆盖输入
+    $("tmSrt").value = r.result;  // 程序化赋值不触发 input，不会重复步进版本
+    $("tmMessage").innerHTML =
+      '<div class="hint">文件已载入，请点击「预览替换结果」。</div>';
+  };
+  r.onerror = () => {
+    if (v !== tmVersion) return;
+    $("tmMessage").innerHTML = `<div class="error">⚠ 文件读取失败：${escapeHtml(f.name)}</div>`;
+  };
+  r.readAsText(f);
+});
 
 function tmPayload() {
   return JSON.stringify({ srt: $("tmSrt").value, terms: $("tmTerms").value });
@@ -1712,35 +1755,71 @@ function renderTmPreview(pv) {
 }
 
 async function tmPreview() {
-  $("tmMessage").innerHTML = "";
+  // 重新预览（即便是相同输入）也作废旧结果与旧请求。
+  const v = ++tmVersion;
+  const req = ++tmRequestSeq;
+  tmSaved = null;
+  $("tmExportBtn").disabled = true;
+  $("tmResult").innerHTML = "";
+  $("tmMessage").innerHTML = '<div class="hint">预览中…</div>';
+
+  const body = tmPayload();
   let res;
   try {
     res = await fetch("/api/terms/preview", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: tmPayload(),
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
     });
-  } catch (e) { return showTmError("网络错误：" + e); }
+  } catch (e) {
+    // 过期失败（输入已改 / 已重新预览）静默忽略。
+    if (v === tmVersion && req === tmRequestSeq) showTmError("网络错误：" + e);
+    return;
+  }
+  // 仅当前输入版本的最新预览请求可更新结果、错误与按钮；过期成功或失败均忽略。
+  if (v !== tmVersion || req !== tmRequestSeq) return;
   const data = await res.json();
-  if (res.ok) return renderTmPreview(data);
-  return showTmError(tmErrDetail(data));
+  if (!res.ok) return showTmError(tmErrDetail(data));
+  tmSaved = { body, preview: data };  // 保存当前版本的 SRT 与术语快照，供下载使用
+  renderTmPreview(data);
 }
 
 async function tmExport() {
-  let res;
+  if (tmExporting || !tmSaved) return;  // 下载期间 / 无有效成功预览时禁止提交
+  const v = tmVersion;
+  const saved = tmSaved;  // 只发送有效成功预览保存的快照，不读取当前输入框
+  tmExporting = true;
+  $("tmExportBtn").disabled = true;
   try {
-    res = await fetch("/api/terms/export", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: tmPayload(),
-    });
-  } catch (e) { return showTmError("网络错误：" + e); }
-  if (!res.ok) {
-    const data = await res.json();
-    return showTmError(tmErrDetail(data) || "下载被拒绝");
+    let res;
+    try {
+      res = await fetch("/api/terms/export", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: saved.body,
+      });
+    } catch (e) {
+      if (v !== tmVersion) return;
+      tmSaved = null;  // 当前版本下载失败：快照作废，需重新预览后再下载
+      showTmError("网络错误：" + e);
+      return;
+    }
+    // 返回时版本已变（输入被编辑 / 换了文件 / 已重新预览）：丢弃文件，不触发保存。
+    if (v !== tmVersion) return;
+    if (!res.ok) {
+      const data = await res.json();
+      tmSaved = null;
+      showTmError(tmErrDetail(data) || "下载被拒绝");
+      return;
+    }
+    const blob = await res.blob();
+    if (v !== tmVersion) return;  // 读取响应体期间版本变化同样丢弃
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "terms_replaced.srt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } finally {
+    tmExporting = false;
+    // 仅当版本未变时恢复按钮；版本已变则交由新版本的输入失效 / 预览流程接管。
+    if (v === tmVersion) $("tmExportBtn").disabled = !tmSaved;
   }
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "terms_replaced.srt";
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 </script>
 </body>
